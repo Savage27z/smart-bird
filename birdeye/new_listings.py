@@ -190,14 +190,26 @@ class GraduationPredictor:
     # Internal scoring helpers
     # ------------------------------------------------------------------ #
     async def _security_ok(self, address: str) -> bool:
-        """Return True if the token passes the security screen."""
+        """Return True if the token passes the security screen.
+
+        When ``SECURITY_SCREEN_REQUIRED=false`` (typically because the API
+        key is on Birdeye's Standard tier which lacks /defi/token_security
+        access) this returns True unconditionally \u2014 with a loud warning
+        logged once at startup, not per-token.
+        """
+        # Feature flag for Standard-tier API keys that can't hit /defi/token_security.
+        from config import SECURITY_SCREEN_REQUIRED
+        if not SECURITY_SCREEN_REQUIRED:
+            return True
+
         # Birdeye endpoint: GET /defi/token_security
         sec = await self.client.get_token_security(address)
         if not sec:
             # Fail closed: a security check we can't run is no security at all.
             # Log so flaky Birdeye responses don't silently kill the funnel.
             log.warning(
-                'Layer 1: token_security lookup failed for %s; dropping candidate',
+                'Layer 1: token_security lookup failed for %s; dropping candidate '
+                '(set SECURITY_SCREEN_REQUIRED=false if your Birdeye tier lacks this endpoint)',
                 address,
             )
             return False

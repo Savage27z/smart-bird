@@ -79,6 +79,34 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
 
 # ---------------------------------------------------------------------------
+# Feature flags
+# ---------------------------------------------------------------------------
+_BOOL_TRUE = ('1', 'true', 'yes', 'on')
+
+# Birdeye's /defi/token_security endpoint requires Lite tier or higher.
+# Users on Standard (free) tier should set SECURITY_SCREEN_REQUIRED=false so
+# the Layer 1 funnel doesn't drop every candidate on a 401. When disabled, a
+# prominent warning fires at startup because honeypot/mintable/rug filtering
+# is skipped entirely.
+SECURITY_SCREEN_REQUIRED = os.getenv(
+    'SECURITY_SCREEN_REQUIRED', 'true',
+).strip().lower() in _BOOL_TRUE
+
+# Individual per-layer alert channels. All default ON. Set to false to silence
+# a specific channel without disabling the whole bot.
+ENABLE_GRADUATION_ALERTS = os.getenv(
+    'ENABLE_GRADUATION_ALERTS', 'true',
+).strip().lower() in _BOOL_TRUE
+
+ENABLE_SMART_MONEY_ALERTS = os.getenv(
+    'ENABLE_SMART_MONEY_ALERTS', 'true',
+).strip().lower() in _BOOL_TRUE
+
+ENABLE_EXIT_ALERTS = os.getenv(
+    'ENABLE_EXIT_ALERTS', 'true',
+).strip().lower() in _BOOL_TRUE
+
+# ---------------------------------------------------------------------------
 # Layer 1 — Graduation predictor
 # ---------------------------------------------------------------------------
 GRADUATION_SCORE_THRESHOLD = _env_int('GRADUATION_SCORE_THRESHOLD', 65, min_value=0, max_value=100)

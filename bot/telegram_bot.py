@@ -126,8 +126,13 @@ class SmartBirdBot:
             )
             return
         await update.effective_message.reply_text(
-            "Smart Bird monitoring active. You'll receive alerts when "
-            "the three-layer signal aligns."
+            "Smart Bird monitoring active.\n\n"
+            "You'll get:\n"
+            "🎯 Graduation Watch — Layer 1 passers (early heads-up)\n"
+            "🐋 Smart Money Move — tracked alpha wallet entries\n"
+            "🚨 Smart Bird Alert — all three layers aligned (flagship)\n"
+            "🔴 Exit Signal — liquidity stress on watched tokens\n\n"
+            "Use /status for live counts, /watchlist for current tokens."
         )
 
     async def _cmd_status(

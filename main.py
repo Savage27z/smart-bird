@@ -21,12 +21,21 @@ from birdeye.client import BirdeyeClient
 from birdeye.liquidity import LiquidityMonitor
 from birdeye.new_listings import GraduationPredictor
 from birdeye.smart_money import SmartMoneyTracker
-from bot.formatter import format_entry_alert, format_exit_alert
+from bot.formatter import (
+    format_entry_alert,
+    format_exit_alert,
+    format_graduation_alert,
+    format_smart_money_alert,
+)
 from bot.telegram_bot import SmartBirdBot
 from config import (
     ALERT_DEDUP_WINDOW_SECONDS,
+    ENABLE_EXIT_ALERTS,
+    ENABLE_GRADUATION_ALERTS,
+    ENABLE_SMART_MONEY_ALERTS,
     LIQUIDITY_POLL_SECONDS,
     POLL_INTERVAL_SECONDS,
+    SECURITY_SCREEN_REQUIRED,
     SMART_MONEY_POLL_SECONDS,
     SMART_MONEY_WALLETS,
     TELEGRAM_BOT_TOKEN,
@@ -48,15 +57,41 @@ log = logging.getLogger('smart-bird')
 async def layer1_loop(
     predictor: GraduationPredictor,
     db: Database,
+    bot: SmartBirdBot,
     signal_queue: 'asyncio.Queue[tuple[str, dict]]',
 ) -> None:
-    """Periodically pull new listings, score them, and queue passers."""
-    del db  # Layer 1 persists via predictor.run_once itself.
+    """Periodically pull new listings, score them, and queue passers.
+
+    Also fires an independent Layer 1 'Graduation Watch' alert for each
+    passer when ENABLE_GRADUATION_ALERTS is on. Deduped on (address,
+    'graduation') via the existing 1-hour window.
+    """
     while True:
         try:
             passed = await predictor.run_once()
             for token in passed:
                 await signal_queue.put(('layer1', token))
+                if not ENABLE_GRADUATION_ALERTS:
+                    continue
+                address = token.get('address')
+                if not address:
+                    continue
+                if await db.was_alerted_recently(
+                    address, 'graduation', ALERT_DEDUP_WINDOW_SECONDS,
+                ):
+                    continue
+                msg = format_graduation_alert(
+                    token, token.get('score', 0),
+                    token.get('breakdown', {}),
+                )
+                await db.record_alert_attempt(address, 'graduation')
+                if await bot.send_alert(msg):
+                    await db.record_alert_sent(address, 'graduation')
+                else:
+                    log.warning(
+                        'Graduation alert send failed for %s; will retry on next pass',
+                        address,
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -67,6 +102,7 @@ async def layer1_loop(
 async def layer2_loop(
     tracker: SmartMoneyTracker,
     db: Database,
+    bot: SmartBirdBot,
     signal_queue: 'asyncio.Queue[tuple[str, dict]]',
 ) -> None:
     """For every Layer-1 token, check if smart money entered recently.
@@ -91,6 +127,19 @@ async def layer2_loop(
                         await signal_queue.put(
                             ('layer2', {'token': t, 'smart_money': hit})
                         )
+                        # Fire independent smart-money alert — separate dedup key.
+                        if ENABLE_SMART_MONEY_ALERTS and not await db.was_alerted_recently(
+                            address, 'smart_money', ALERT_DEDUP_WINDOW_SECONDS,
+                        ):
+                            sm_msg = format_smart_money_alert(t, hit)
+                            await db.record_alert_attempt(address, 'smart_money')
+                            if await bot.send_alert(sm_msg):
+                                await db.record_alert_sent(address, 'smart_money')
+                            else:
+                                log.warning(
+                                    'Smart-money alert send failed for %s',
+                                    address,
+                                )
                     else:
                         log.info(
                             'Layer 2: %s already past layer2 stage, skipping enqueue',
@@ -165,6 +214,11 @@ async def layer3_loop(
                     stress['lp_concentration'],
                     triggered_by=stress.get('triggered_by', 'both'),
                 )
+                if not ENABLE_EXIT_ALERTS:
+                    # User has silenced exit alerts; still mark exited so we
+                    # stop snapshotting, since liquidity has clearly collapsed.
+                    await db.mark_exited(address)
+                    continue
                 await db.record_alert_attempt(address, 'exit')
                 if await bot.send_alert(msg):
                     await db.record_alert_sent(address, 'exit')
@@ -283,6 +337,19 @@ async def main() -> None:
                 'alerts will fire. Set SMART_MONEY_WALLETS in your .env to enable.'
             )
 
+        if not SECURITY_SCREEN_REQUIRED:
+            log.warning(
+                'SECURITY_SCREEN_REQUIRED=false — Layer 1 honeypot/mintable/rug '
+                'filtering is DISABLED. Only run in this mode when your Birdeye '
+                'tier lacks /defi/token_security access.'
+            )
+
+        if not (ENABLE_GRADUATION_ALERTS and ENABLE_SMART_MONEY_ALERTS and ENABLE_EXIT_ALERTS):
+            log.info(
+                'Alert channels: graduation=%s smart_money=%s exit=%s (combined entry always on)',
+                ENABLE_GRADUATION_ALERTS, ENABLE_SMART_MONEY_ALERTS, ENABLE_EXIT_ALERTS,
+            )
+
         signal_queue: asyncio.Queue = asyncio.Queue()
         stop_event = asyncio.Event()
 
@@ -296,8 +363,8 @@ async def main() -> None:
                 pass
 
         tasks = [
-            asyncio.create_task(layer1_loop(predictor, db, signal_queue)),
-            asyncio.create_task(layer2_loop(tracker, db, signal_queue)),
+            asyncio.create_task(layer1_loop(predictor, db, bot, signal_queue)),
+            asyncio.create_task(layer2_loop(tracker, db, bot, signal_queue)),
             asyncio.create_task(layer3_loop(monitor, db, bot)),
             asyncio.create_task(
                 alert_dispatcher(signal_queue, db, monitor, bot, predictor)

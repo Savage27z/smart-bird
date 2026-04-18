@@ -20,7 +20,14 @@ Smart Bird runs three asynchronous loops in parallel and stitches them into two 
 2. **Layer 2 — Smart Money Tracker.** Watches the recent swap history of every Layer-1 passer for entries by a curated alpha-wallet set (configurable via env). Best-effort validates the wallet still holds the token via portfolio lookup before confirming — if Birdeye returns an unexpected payload or fails the lookup, the on-chain trade itself is treated as evidence (logged).
 3. **Layer 3 — Liquidity Stress Monitor.** Snapshots liquidity and LP concentration every minute for every active token. Powers **independent exit alerts** whenever liquidity drops >20% in a 5-minute window or the top-10 holder share exceeds 80%.
 
-**Entry alert** fires when **Layer 1 + Layer 2** both pass for the same token. Layer 3 then takes a fresh liquidity snapshot for the alert body and gates delivery on its success — if liquidity can't be read, the entry alert is held for the next dispatcher pass and not lost. **Exit alert** fires from Layer 3 alone whenever a watched token's liquidity collapses or concentration spikes. Both alert types are deduped on `(address, alert_type)` over a rolling 1-hour window.
+Smart Bird emits four alert channels, each independently deduped on a 1-hour window:
+
+- 🎯 **Graduation Watch** — Layer 1 alone. Fires the moment a token clears the graduation threshold, before Layer 2 confirmation. An early heads-up.
+- 🐋 **Smart Money Move** — Layer 2 alone. Fires when a tracked alpha wallet buys a Layer-1 passer.
+- 🚨 **Smart Bird Alert** (flagship) — Layers 1 + 2 aligned, Layer 3 liquidity attached. This is the high-conviction alert.
+- 🔴 **Exit Signal** — Layer 3 alone. Fires when a watched token's liquidity collapses or top-holder concentration spikes.
+
+Each channel can be silenced independently via env (`ENABLE_GRADUATION_ALERTS`, `ENABLE_SMART_MONEY_ALERTS`, `ENABLE_EXIT_ALERTS`). The flagship Smart Bird Alert is always on.
 
 ---
 
@@ -130,7 +137,27 @@ DB_PATH=./smart-bird.db API_CALLS_LOG=./api_calls.log python main.py
 
 ## 📟 Sample alerts
 
-### Entry
+### 🎯 Graduation Watch (Layer 1)
+```
+🎯 *GRADUATION WATCH*
+Token: $PEPE2 (`So11111111111111111111111111111111111111112`)
+Price: $0.000123 | MCap: $842,000
+✅ Layer 1 Score: 78/100
+✅ Holders: 312 | Buy Pressure: 72%
+⏳ Awaiting smart-money confirmation for full alert
+🔗 Birdeye: https://birdeye.so/token/So11111111111111111111111111111111111111112
+```
+
+### 🐋 Smart Money Move (Layer 2)
+```
+🐋 *SMART MONEY MOVE*
+Token: $PEPE2 (`So11111111111111111111111111111111111111112`)
+✅ Wallet: 9WzD...AWWM entered 4min ago
+💵 Size: $12,500
+🔗 Birdeye: https://birdeye.so/token/So11111111111111111111111111111111111111112
+```
+
+### 🚨 Smart Bird Alert (flagship — all three layers aligned)
 ```
 🚨 *SMART BIRD ALERT*
 Token: $PEPE2 (`So11111111111111111111111111111111111111112`)
@@ -142,7 +169,7 @@ Price: $0.000123 | MCap: $842,000
 🔗 Birdeye: https://birdeye.so/token/So11111111111111111111111111111111111111112
 ```
 
-### Exit
+### 🔴 Exit Signal (Layer 3)
 ```
 🔴 *EXIT SIGNAL* — $PEPE2
 Liquidity dropped 34% in 4min

@@ -73,6 +73,59 @@ def format_entry_alert(
     )
 
 
+def format_graduation_alert(token: dict, score: int, breakdown: dict) -> str:
+    """Layer 1 standalone alert — token crossed graduation threshold.
+
+    Fires immediately when a token passes Layer 1, before (and independently of)
+    any Layer 2 smart-money confirmation. Intended as an early heads-up.
+    """
+    address = token.get('address', '')
+    symbol = _md_escape(token.get('symbol') or '???')
+    price = float(token.get('price') or 0.0)
+    market_cap = float(token.get('market_cap') or 0.0)
+    holders = int(breakdown.get('holders') or 0)
+    buy_pressure = float(breakdown.get('buy_pressure_ratio') or 0.0)
+    return (
+        f"🎯 *GRADUATION WATCH*\n"
+        f"Token: ${symbol} (`{address}`)\n"
+        f"Price: ${price:.6f} | MCap: ${market_cap:,.0f}\n"
+        f"✅ Layer 1 Score: {score}/100\n"
+        f"✅ Holders: {holders:,} | Buy Pressure: {buy_pressure*100:.0f}%\n"
+        f"⏳ Awaiting smart-money confirmation for full alert\n"
+        f"🔗 Birdeye: https://birdeye.so/token/{address}"
+    )
+
+
+def format_smart_money_alert(token: dict, smart_money: dict) -> str:
+    """Layer 2 standalone alert — tracked alpha wallet bought a Layer-1 passer.
+
+    Fires when Layer 2 confirms on a Layer-1-passer token. The combined
+    SMART BIRD ALERT fires shortly after with full liquidity context; this
+    alert is the earlier per-layer signal.
+    """
+    address = token.get('address', '')
+    symbol = _md_escape(token.get('symbol') or '???')
+    wallet = smart_money.get('wallet') or ''
+    short_wallet = (
+        f'{wallet[:4]}...{wallet[-4:]}' if len(wallet) >= 8 else (wallet or 'unknown')
+    )
+    short_wallet = _md_escape(short_wallet)
+    minutes_ago = int(smart_money.get('minutes_ago') or 0)
+    amount_usd = smart_money.get('amount_usd')
+    amount_line = ''
+    if amount_usd:
+        try:
+            amount_line = f"\n💵 Size: ${float(amount_usd):,.0f}"
+        except (TypeError, ValueError):
+            amount_line = ''
+    return (
+        f"🐋 *SMART MONEY MOVE*\n"
+        f"Token: ${symbol} (`{address}`)\n"
+        f"✅ Wallet: {short_wallet} entered {minutes_ago}min ago{amount_line}\n"
+        f"🔗 Birdeye: https://birdeye.so/token/{address}"
+    )
+
+
 def format_exit_alert(
     symbol: str,
     drop_pct: float,
