@@ -14,6 +14,8 @@ RUN useradd --system --create-home --uid 1000 smartbird \
 COPY --chown=smartbird:smartbird . .
 
 USER smartbird
-VOLUME ["/data"]
+# Note: no VOLUME directive — Railway rejects it. Attach a Railway volume to
+# /data in the service settings instead. docker-compose.yml still declares its
+# own named volume for local `docker compose up` runs.
 STOPSIGNAL SIGTERM
 CMD ["python", "-u", "main.py"]
