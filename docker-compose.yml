@@ -1,0 +1,12 @@
+version: '3.9'
+services:
+  smart-bird:
+    build: .
+    container_name: smart-bird
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - smart-bird-data:/data
+    stop_grace_period: 30s
+volumes:
+  smart-bird-data:
