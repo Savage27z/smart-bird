@@ -8,7 +8,7 @@
 
 A unified signal pipeline that stacks three distinct on-chain intelligence layers into a single, high-conviction Telegram alert. Every Birdeye call is logged to `api_calls.log`, and the stack is packaged as a reproducible `docker compose` deployment.
 
-> Tags: `#BirdeyeAPI` `@birdeye_data`
+
 
 ---
 
@@ -84,7 +84,7 @@ Smart Bird runs three asynchronous loops in parallel and stitches them into two 
 ## ⚙️ Setup (Docker — recommended)
 
 ```bash
-git clone https://github.com/nuel-0x-md/smart-bird.git
+git clone https://github.com/savage27z/smart-bird.git
 cd smart-bird
 cp .env.example .env
 # edit .env with your BIRDEYE_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
