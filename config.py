@@ -110,8 +110,8 @@ ENABLE_EXIT_ALERTS = os.getenv(
 # Layer 1 — Graduation predictor
 # ---------------------------------------------------------------------------
 GRADUATION_SCORE_THRESHOLD = _env_int('GRADUATION_SCORE_THRESHOLD', 65, min_value=0, max_value=100)
-MIN_HOLDER_COUNT = 100
-MIN_BUY_PRESSURE = 0.60  # 60%
+MIN_HOLDER_COUNT = _env_int("MIN_HOLDER_COUNT", 20, min_value=1, max_value=100000)
+MIN_BUY_PRESSURE = _env_float('MIN_BUY_PRESSURE', 0.55, min_value=0.0, max_value=1.0)
 
 # ---------------------------------------------------------------------------
 # Layer 2 — Smart money tracker
