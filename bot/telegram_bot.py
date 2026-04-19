@@ -161,9 +161,7 @@ class SmartBirdBot:
             "🐋 Smart Money Move — tracked alpha wallet entries\n"
             "🚨 Smart Bird Alert — all three layers aligned (flagship)\n"
             "🔴 Exit Signal — liquidity stress on watched tokens\n\n"
-            "Commands: /status /watchlist /stop\n\n"
-            "Built on Birdeye Data API • open source: "
-            "github.com/nuel-0x-md/smart-bird",
+            "Commands: /status /watchlist /stop",
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
         )
