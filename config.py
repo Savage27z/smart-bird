@@ -128,6 +128,16 @@ LIQUIDITY_WINDOW_SECONDS = 5 * 60  # 5 min
 LP_CONCENTRATION_THRESHOLD = 0.80  # 80%
 
 # ---------------------------------------------------------------------------
+# Layer 4 — Social sentiment
+# ---------------------------------------------------------------------------
+SENTIMENT_POLL_SECONDS = _env_int('SENTIMENT_POLL_SECONDS', 60, min_value=10, max_value=3600)
+DEXSCREENER_BASE_URL = 'https://api.dexscreener.com'
+
+ENABLE_SENTIMENT_LAYER = os.getenv(
+    'ENABLE_SENTIMENT_LAYER', 'true',
+).strip().lower() in _BOOL_TRUE
+
+# ---------------------------------------------------------------------------
 # Polling cadence
 # ---------------------------------------------------------------------------
 POLL_INTERVAL_SECONDS = _env_int('POLL_INTERVAL_SECONDS', 60, min_value=10, max_value=3600)
@@ -150,6 +160,19 @@ API_CALLS_LOG = os.getenv('API_CALLS_LOG', '/data/api_calls.log')
 # ---------------------------------------------------------------------------
 MAX_RETRIES = 5
 BASE_BACKOFF_SECONDS = 1.5
+
+# ---------------------------------------------------------------------------
+# Response cache
+# ---------------------------------------------------------------------------
+CACHE_TTL_OVERVIEW = _env_int('CACHE_TTL_OVERVIEW', 30, min_value=5, max_value=300)
+CACHE_TTL_SECURITY = _env_int('CACHE_TTL_SECURITY', 120, min_value=30, max_value=600)
+CACHE_TTL_OHLCV = _env_int('CACHE_TTL_OHLCV', 30, min_value=5, max_value=300)
+CACHE_TTL_TRADES = _env_int('CACHE_TTL_TRADES', 20, min_value=5, max_value=300)
+CACHE_TTL_HOLDERS = _env_int('CACHE_TTL_HOLDERS', 60, min_value=10, max_value=600)
+CACHE_TTL_PORTFOLIO = _env_int('CACHE_TTL_PORTFOLIO', 30, min_value=5, max_value=300)
+
+# Maximum age (seconds) before Layer 3 stops monitoring a token.
+LAYER3_MAX_AGE_SECONDS = _env_int('LAYER3_MAX_AGE_SECONDS', 7200, min_value=600, max_value=86400)
 
 import logging
 

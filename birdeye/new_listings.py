@@ -86,6 +86,11 @@ class GraduationPredictor:
 
             await self.db.upsert_token(address, symbol, name, int(time.time()))
 
+            # Skip tokens that have already progressed past initial scoring.
+            existing = await self.db.get_token(address)
+            if existing and existing.get('status') not in ('new', 'scoring'):
+                continue
+
             # Security screen — rug / honeypot filter.
             if not await self._security_ok(address):
                 log.info('Layer 1: %s failed security screen, skipping', address)

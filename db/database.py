@@ -71,6 +71,35 @@ CREATE TABLE IF NOT EXISTS subscribers (
     added_at INTEGER NOT NULL,
     muted INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS alert_performance (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_address TEXT NOT NULL,
+    symbol TEXT,
+    alert_type TEXT NOT NULL,
+    alert_time INTEGER NOT NULL,
+    alert_price REAL NOT NULL,
+    alert_mcap REAL,
+    check_1h_price REAL,
+    check_1h_at INTEGER,
+    check_6h_price REAL,
+    check_6h_at INTEGER,
+    check_24h_price REAL,
+    check_24h_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_perf_token
+    ON alert_performance(token_address, alert_time);
+
+CREATE TABLE IF NOT EXISTS user_watchlist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT NOT NULL,
+    token_address TEXT NOT NULL,
+    symbol TEXT,
+    added_at INTEGER NOT NULL,
+    UNIQUE(chat_id, token_address)
+);
+CREATE INDEX IF NOT EXISTS idx_watchlist_user
+    ON user_watchlist(chat_id);
 """
 
 
@@ -506,3 +535,184 @@ class Database:
                 (1 if muted else 0, str(chat_id)),
             )
         return (await asyncio.to_thread(_run)) > 0
+
+    # ------------------------------------------------------------------ #
+    # Performance tracking
+    # ------------------------------------------------------------------ #
+    async def record_alert_performance(
+        self, address: str, symbol: str, alert_type: str,
+        alert_price: float, alert_mcap: float | None,
+    ) -> None:
+        """Record a new alert with its price at fire time."""
+        def _run() -> None:
+            self._execute(
+                """
+                INSERT INTO alert_performance
+                    (token_address, symbol, alert_type, alert_time, alert_price, alert_mcap)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (address, symbol, alert_type, int(time.time()), float(alert_price), alert_mcap),
+            )
+        await asyncio.to_thread(_run)
+
+    async def get_pending_performance_checks(self, interval_key: str, min_age_seconds: int) -> list[dict]:
+        """Return alerts that are old enough for the given check but haven't been checked yet.
+
+        interval_key is one of: 'check_1h', 'check_6h', 'check_24h'
+        """
+        col_price = f'{interval_key}_price'
+        col_at = f'{interval_key}_at'
+        cutoff = int(time.time()) - min_age_seconds
+        def _run() -> list[dict]:
+            return self._query_all(
+                f"""
+                SELECT id, token_address, symbol, alert_type, alert_time, alert_price, alert_mcap
+                  FROM alert_performance
+                 WHERE {col_price} IS NULL
+                   AND alert_time <= ?
+                 ORDER BY alert_time ASC
+                 LIMIT 20
+                """,
+                (cutoff,),
+            )
+        return await asyncio.to_thread(_run)
+
+    async def update_performance_check(
+        self, row_id: int, interval_key: str, price: float,
+    ) -> None:
+        """Fill in a performance check column."""
+        col_price = f'{interval_key}_price'
+        col_at = f'{interval_key}_at'
+        def _run() -> None:
+            self._execute(
+                f"""
+                UPDATE alert_performance
+                   SET {col_price} = ?, {col_at} = ?
+                 WHERE id = ?
+                """,
+                (float(price), int(time.time()), row_id),
+            )
+        await asyncio.to_thread(_run)
+
+    async def get_performance_stats(self) -> dict:
+        """Aggregate performance stats for the /performance command."""
+        def _run() -> dict:
+            total = self._query_one('SELECT COUNT(*) AS c FROM alert_performance')
+            total_count = int(total['c']) if total else 0
+
+            # 1h stats
+            checked_1h = self._query_one(
+                'SELECT COUNT(*) AS c FROM alert_performance WHERE check_1h_price IS NOT NULL'
+            )
+            wins_1h = self._query_one(
+                'SELECT COUNT(*) AS c FROM alert_performance '
+                'WHERE check_1h_price IS NOT NULL AND check_1h_price > alert_price'
+            )
+            avg_return_1h = self._query_one(
+                'SELECT AVG((check_1h_price - alert_price) / alert_price * 100) AS avg_ret '
+                'FROM alert_performance WHERE check_1h_price IS NOT NULL AND alert_price > 0'
+            )
+
+            # 6h stats
+            checked_6h = self._query_one(
+                'SELECT COUNT(*) AS c FROM alert_performance WHERE check_6h_price IS NOT NULL'
+            )
+            wins_6h = self._query_one(
+                'SELECT COUNT(*) AS c FROM alert_performance '
+                'WHERE check_6h_price IS NOT NULL AND check_6h_price > alert_price'
+            )
+            avg_return_6h = self._query_one(
+                'SELECT AVG((check_6h_price - alert_price) / alert_price * 100) AS avg_ret '
+                'FROM alert_performance WHERE check_6h_price IS NOT NULL AND alert_price > 0'
+            )
+
+            # 24h stats
+            checked_24h = self._query_one(
+                'SELECT COUNT(*) AS c FROM alert_performance WHERE check_24h_price IS NOT NULL'
+            )
+            wins_24h = self._query_one(
+                'SELECT COUNT(*) AS c FROM alert_performance '
+                'WHERE check_24h_price IS NOT NULL AND check_24h_price > alert_price'
+            )
+            avg_return_24h = self._query_one(
+                'SELECT AVG((check_24h_price - alert_price) / alert_price * 100) AS avg_ret '
+                'FROM alert_performance WHERE check_24h_price IS NOT NULL AND alert_price > 0'
+            )
+
+            # Recent alerts with known outcomes
+            recent = self._query_all(
+                'SELECT token_address, symbol, alert_type, alert_price, '
+                'check_1h_price, check_6h_price, check_24h_price '
+                'FROM alert_performance '
+                'WHERE check_1h_price IS NOT NULL '
+                'ORDER BY alert_time DESC LIMIT 5'
+            )
+
+            return {
+                'total_alerts': total_count,
+                'checked_1h': int(checked_1h['c']) if checked_1h else 0,
+                'wins_1h': int(wins_1h['c']) if wins_1h else 0,
+                'avg_return_1h': float(avg_return_1h['avg_ret']) if avg_return_1h and avg_return_1h['avg_ret'] is not None else 0.0,
+                'checked_6h': int(checked_6h['c']) if checked_6h else 0,
+                'wins_6h': int(wins_6h['c']) if wins_6h else 0,
+                'avg_return_6h': float(avg_return_6h['avg_ret']) if avg_return_6h and avg_return_6h['avg_ret'] is not None else 0.0,
+                'checked_24h': int(checked_24h['c']) if checked_24h else 0,
+                'wins_24h': int(wins_24h['c']) if wins_24h else 0,
+                'avg_return_24h': float(avg_return_24h['avg_ret']) if avg_return_24h and avg_return_24h['avg_ret'] is not None else 0.0,
+                'recent': recent,
+            }
+        return await asyncio.to_thread(_run)
+
+    # ------------------------------------------------------------------ #
+    # User watchlist
+    # ------------------------------------------------------------------ #
+    async def add_to_user_watchlist(
+        self, chat_id: str, address: str, symbol: str | None = None,
+    ) -> bool:
+        """Add a token to ``chat_id``'s personal watchlist.
+
+        Returns True when the row was freshly inserted, False when the token
+        was already on this user's watchlist (UNIQUE(chat_id, token_address)
+        conflict is swallowed via ``ON CONFLICT DO NOTHING``).
+        """
+        def _run() -> int:
+            return self._execute_with_rowcount(
+                """
+                INSERT INTO user_watchlist (chat_id, token_address, symbol, added_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(chat_id, token_address) DO NOTHING
+                """,
+                (str(chat_id), address, symbol, int(time.time())),
+            )
+        return (await asyncio.to_thread(_run)) > 0
+
+    async def remove_from_user_watchlist(
+        self, chat_id: str, address: str,
+    ) -> bool:
+        """Remove a token from ``chat_id``'s watchlist. Returns True if the row existed."""
+        def _run() -> int:
+            return self._execute_with_rowcount(
+                'DELETE FROM user_watchlist WHERE chat_id = ? AND token_address = ?',
+                (str(chat_id), address),
+            )
+        return (await asyncio.to_thread(_run)) > 0
+
+    async def get_user_watchlist(self, chat_id: str) -> list[dict]:
+        """Return all tokens on ``chat_id``'s watchlist, newest additions first.
+
+        Joins against ``tracked_tokens`` so callers can surface pipeline status
+        and the most recent graduation score alongside the user's own symbol.
+        """
+        def _run() -> list[dict]:
+            return self._query_all(
+                """
+                SELECT uw.token_address, uw.symbol, uw.added_at,
+                       tt.status, tt.graduation_score
+                  FROM user_watchlist uw
+                  LEFT JOIN tracked_tokens tt ON tt.address = uw.token_address
+                 WHERE uw.chat_id = ?
+                 ORDER BY uw.added_at DESC
+                """,
+                (str(chat_id),),
+            )
+        return await asyncio.to_thread(_run)

@@ -1,12 +1,14 @@
 """Smart Bird — entry point.
 
 Boots the Telegram bot, opens the shared Birdeye client, initialises the
-SQLite database, and runs four concurrent loops:
+SQLite database, and runs four concurrent loops plus a supplementary
+sentiment analyzer:
 
     * Layer 1 — graduation predictor
     * Layer 2 — smart money tracker
     * Layer 3 — liquidity stress monitor
-    * Alert dispatcher — combines the three into entry alerts
+    * Layer 4 — social sentiment analyzer (augments entry/graduation alerts)
+    * Alert dispatcher — combines the layers into entry alerts
 
 SIGTERM / SIGINT gracefully cancels the loops, closes the HTTP session, stops
 the Telegram bot and closes the DB.
@@ -20,6 +22,7 @@ import signal
 from birdeye.client import BirdeyeClient
 from birdeye.liquidity import LiquidityMonitor
 from birdeye.new_listings import GraduationPredictor
+from birdeye.sentiment import SentimentAnalyzer
 from birdeye.smart_money import SmartMoneyTracker
 from bot.formatter import (
     format_entry_alert,
@@ -27,12 +30,13 @@ from bot.formatter import (
     format_graduation_alert,
     format_smart_money_alert,
 )
-from bot.telegram_bot import SmartBirdBot
+from bot.telegram_bot import SmartBirdBot, _alert_keyboard
 from config import (
     ALERT_DEDUP_WINDOW_SECONDS,
     ENABLE_EXIT_ALERTS,
     ENABLE_GRADUATION_ALERTS,
     ENABLE_SMART_MONEY_ALERTS,
+    LAYER3_MAX_AGE_SECONDS,
     LIQUIDITY_POLL_SECONDS,
     POLL_INTERVAL_SECONDS,
     SECURITY_SCREEN_REQUIRED,
@@ -59,6 +63,7 @@ async def layer1_loop(
     db: Database,
     bot: SmartBirdBot,
     signal_queue: 'asyncio.Queue[tuple[str, dict]]',
+    sentiment: SentimentAnalyzer,
 ) -> None:
     """Periodically pull new listings, score them, and queue passers.
 
@@ -80,13 +85,26 @@ async def layer1_loop(
                     address, 'graduation', ALERT_DEDUP_WINDOW_SECONDS,
                 ):
                     continue
+                sentiment_score, sentiment_breakdown = await sentiment.analyze(
+                    address,
+                    first_seen=token.get('breakdown', {}).get('first_seen'),
+                )
                 msg = format_graduation_alert(
                     token, token.get('score', 0),
                     token.get('breakdown', {}),
+                    sentiment_score=sentiment_score,
+                    sentiment_breakdown=sentiment_breakdown,
                 )
                 await db.record_alert_attempt(address, 'graduation')
-                if await bot.send_alert(msg):
+                if await bot.send_alert(msg, reply_markup=_alert_keyboard(address)):
                     await db.record_alert_sent(address, 'graduation')
+                    await db.record_alert_performance(
+                        address,
+                        token.get('symbol', ''),
+                        'graduation',
+                        float(token.get('breakdown', {}).get('price', 0)),
+                        float(token.get('breakdown', {}).get('market_cap', 0)),
+                    )
                 else:
                     log.warning(
                         'Graduation alert send failed for %s; will retry on next pass',
@@ -125,7 +143,11 @@ async def layer2_loop(
                 if hit:
                     if await db.mark_layer2_confirmed(address, hit['wallet']):
                         await signal_queue.put(
-                            ('layer2', {'token': t, 'smart_money': hit})
+                            ('layer2', {
+                                'token': t,
+                                'smart_money': hit,
+                                'score': t.get('graduation_score'),
+                            })
                         )
                         # Fire independent smart-money alert — separate dedup key.
                         if ENABLE_SMART_MONEY_ALERTS and not await db.was_alerted_recently(
@@ -133,7 +155,7 @@ async def layer2_loop(
                         ):
                             sm_msg = format_smart_money_alert(t, hit)
                             await db.record_alert_attempt(address, 'smart_money')
-                            if await bot.send_alert(sm_msg):
+                            if await bot.send_alert(sm_msg, reply_markup=_alert_keyboard(address)):
                                 await db.record_alert_sent(address, 'smart_money')
                             else:
                                 log.warning(
@@ -175,7 +197,11 @@ async def layer2_loop(
                     address,
                 )
                 await signal_queue.put(
-                    ('layer2', {'token': t, 'smart_money': smart_money})
+                    ('layer2', {
+                        'token': t,
+                        'smart_money': smart_money,
+                        'score': t.get('graduation_score'),
+                    })
                 )
         except asyncio.CancelledError:
             raise
@@ -199,6 +225,15 @@ async def layer3_loop(
                 address = t.get('address')
                 if not address:
                     continue
+                first_seen = t.get('first_seen') or 0
+                import time as _time
+                if _time.time() - first_seen > LAYER3_MAX_AGE_SECONDS:
+                    log.info(
+                        'Layer 3: expiring stale token %s (age > %ds)',
+                        address, LAYER3_MAX_AGE_SECONDS,
+                    )
+                    await db.mark_exited(address)
+                    continue
                 await monitor.snapshot(address)
                 stress = await monitor.detect_stress(address)
                 if not stress:
@@ -220,7 +255,7 @@ async def layer3_loop(
                     await db.mark_exited(address)
                     continue
                 await db.record_alert_attempt(address, 'exit')
-                if await bot.send_alert(msg):
+                if await bot.send_alert(msg, reply_markup=_alert_keyboard(address)):
                     await db.record_alert_sent(address, 'exit')
                     await db.mark_exited(address)
                 else:
@@ -241,6 +276,7 @@ async def alert_dispatcher(
     monitor: LiquidityMonitor,
     bot: SmartBirdBot,
     predictor: GraduationPredictor,
+    sentiment: SentimentAnalyzer,
 ) -> None:
     """Combine layer outputs into entry alerts, deduped on (address, 'entry')."""
     while True:
@@ -270,6 +306,9 @@ async def alert_dispatcher(
                 continue
 
             score, breakdown = await predictor.score_token(address)
+            sentiment_score, sentiment_breakdown = await sentiment.analyze(
+                address, first_seen=current.get('first_seen'),
+            )
             token_for_msg = {
                 'address': address,
                 'symbol': token.get('symbol') or breakdown.get('symbol') or '???',
@@ -279,11 +318,20 @@ async def alert_dispatcher(
             msg = format_entry_alert(
                 token_for_msg, score, breakdown, smart_money,
                 {'current_liquidity': liq['liquidity_usd']},
+                sentiment_score=sentiment_score,
+                sentiment_breakdown=sentiment_breakdown,
             )
             await db.record_alert_attempt(address, 'entry')
-            if await bot.send_alert(msg):
+            if await bot.send_alert(msg, reply_markup=_alert_keyboard(address)):
                 await db.record_alert_sent(address, 'entry')
                 await db.mark_alerted(address)
+                await db.record_alert_performance(
+                    address,
+                    token_for_msg.get('symbol', ''),
+                    'entry',
+                    float(breakdown.get('price', 0)),
+                    float(breakdown.get('market_cap', 0)),
+                )
             else:
                 log.warning(
                     'Entry alert send failed for %s; leaving status at layer2 for retry',
@@ -293,6 +341,58 @@ async def alert_dispatcher(
             raise
         except Exception as e:
             log.exception('alert_dispatcher error: %s', e)
+
+
+async def cache_cleanup_loop(client: BirdeyeClient) -> None:
+    """Periodically evict stale cache entries so memory doesn't grow unbounded."""
+    while True:
+        try:
+            await client.clear_stale_cache(max_age=300)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception('cache_cleanup_loop error: %s', e)
+        await asyncio.sleep(300)
+
+
+async def performance_loop(
+    client: BirdeyeClient,
+    db: Database,
+) -> None:
+    """Periodically check prices for past alerts to track performance."""
+    INTERVALS = [
+        ('check_1h', 3600),
+        ('check_6h', 21600),
+        ('check_24h', 86400),
+    ]
+    while True:
+        try:
+            for interval_key, min_age in INTERVALS:
+                pending = await db.get_pending_performance_checks(interval_key, min_age)
+                for row in pending:
+                    address = row.get('token_address')
+                    if not address:
+                        continue
+                    overview = await client.get_token_overview(address)
+                    if not overview:
+                        continue
+                    price = overview.get('price')
+                    if price is None:
+                        continue
+                    try:
+                        price_f = float(price)
+                    except (TypeError, ValueError):
+                        continue
+                    await db.update_performance_check(row['id'], interval_key, price_f)
+                    log.info(
+                        'Performance check %s for %s: alert_price=%.8f current=%.8f',
+                        interval_key, address, float(row.get('alert_price', 0)), price_f,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception('performance_loop error: %s', e)
+        await asyncio.sleep(300)  # Check every 5 minutes
 
 
 async def smoke_test(client: BirdeyeClient) -> None:
@@ -317,6 +417,7 @@ async def main() -> None:
     db = Database()
     client = BirdeyeClient()
     bot: SmartBirdBot | None = None
+    sentiment: SentimentAnalyzer | None = None
     tasks: list[asyncio.Task] = []
     try:
         from config import validate as validate_config
@@ -325,7 +426,8 @@ async def main() -> None:
         predictor = GraduationPredictor(client, db)
         tracker = SmartMoneyTracker(client, db, SMART_MONEY_WALLETS)
         monitor = LiquidityMonitor(client, db)
-        bot = SmartBirdBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, db)
+        sentiment = SentimentAnalyzer(client)
+        bot = SmartBirdBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, db, client)
 
         await bot.start()
         await smoke_test(client)
@@ -363,12 +465,14 @@ async def main() -> None:
                 pass
 
         tasks = [
-            asyncio.create_task(layer1_loop(predictor, db, bot, signal_queue)),
+            asyncio.create_task(layer1_loop(predictor, db, bot, signal_queue, sentiment)),
             asyncio.create_task(layer2_loop(tracker, db, bot, signal_queue)),
             asyncio.create_task(layer3_loop(monitor, db, bot)),
             asyncio.create_task(
-                alert_dispatcher(signal_queue, db, monitor, bot, predictor)
+                alert_dispatcher(signal_queue, db, monitor, bot, predictor, sentiment)
             ),
+            asyncio.create_task(cache_cleanup_loop(client)),
+            asyncio.create_task(performance_loop(client, db)),
         ]
         await stop_event.wait()
         log.info('Shutdown signal received — cleaning up...')
@@ -386,6 +490,11 @@ async def main() -> None:
             await client.aclose()
         except Exception:
             log.exception('Error closing Birdeye client')
+        if sentiment is not None:
+            try:
+                await sentiment.aclose()
+            except Exception:
+                log.exception('Error closing sentiment analyzer')
         try:
             await db.aclose()
         except Exception:
