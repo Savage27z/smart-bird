@@ -198,11 +198,13 @@ class BirdeyeClient:
     async def get_new_listings(self, limit: int = 20) -> list[dict]:
         """Fetch the most recent token listings (Layer 1 candidate pool)."""
         params = {
-            'time_to': int(time.time()),
+            'time_to': int(time.time()) // 60 * 60,
             'limit': limit,
             'meme_platform_enabled': 'true',
         }
-        data = await self._get('/defi/v2/tokens/new_listing', params=params)
+        data = await self._get_cached(
+            '/defi/v2/tokens/new_listing', params=params, ttl_seconds=55,
+        )
         if not data:
             return []
         if isinstance(data, dict):
@@ -257,7 +259,10 @@ class BirdeyeClient:
         minutes_back: int = 30,
     ) -> list[dict]:
         """OHLCV candles used by the volume-velocity component of Layer 1."""
-        now = int(time.time())
+        # Round timestamps to the nearest 60s so the cache key stays stable
+        # within a minute — without this, every call generates a unique key
+        # and the cache never hits.
+        now = int(time.time()) // 60 * 60
         params = {
             'address': address,
             'type': type_,
