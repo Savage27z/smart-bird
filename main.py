@@ -33,6 +33,7 @@ from config import (
     ENABLE_EXIT_ALERTS,
     ENABLE_GRADUATION_ALERTS,
     ENABLE_SMART_MONEY_ALERTS,
+    LAYER3_MAX_AGE_SECONDS,
     LIQUIDITY_POLL_SECONDS,
     POLL_INTERVAL_SECONDS,
     SECURITY_SCREEN_REQUIRED,
@@ -125,7 +126,11 @@ async def layer2_loop(
                 if hit:
                     if await db.mark_layer2_confirmed(address, hit['wallet']):
                         await signal_queue.put(
-                            ('layer2', {'token': t, 'smart_money': hit})
+                            ('layer2', {
+                                'token': t,
+                                'smart_money': hit,
+                                'score': t.get('graduation_score'),
+                            })
                         )
                         # Fire independent smart-money alert — separate dedup key.
                         if ENABLE_SMART_MONEY_ALERTS and not await db.was_alerted_recently(
@@ -175,7 +180,11 @@ async def layer2_loop(
                     address,
                 )
                 await signal_queue.put(
-                    ('layer2', {'token': t, 'smart_money': smart_money})
+                    ('layer2', {
+                        'token': t,
+                        'smart_money': smart_money,
+                        'score': t.get('graduation_score'),
+                    })
                 )
         except asyncio.CancelledError:
             raise
@@ -198,6 +207,15 @@ async def layer3_loop(
             for t in tokens:
                 address = t.get('address')
                 if not address:
+                    continue
+                first_seen = t.get('first_seen') or 0
+                import time as _time
+                if _time.time() - first_seen > LAYER3_MAX_AGE_SECONDS:
+                    log.info(
+                        'Layer 3: expiring stale token %s (age > %ds)',
+                        address, LAYER3_MAX_AGE_SECONDS,
+                    )
+                    await db.mark_exited(address)
                     continue
                 await monitor.snapshot(address)
                 stress = await monitor.detect_stress(address)
@@ -295,6 +313,18 @@ async def alert_dispatcher(
             log.exception('alert_dispatcher error: %s', e)
 
 
+async def cache_cleanup_loop(client: BirdeyeClient) -> None:
+    """Periodically evict stale cache entries so memory doesn't grow unbounded."""
+    while True:
+        try:
+            await client.clear_stale_cache(max_age=300)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception('cache_cleanup_loop error: %s', e)
+        await asyncio.sleep(300)
+
+
 async def smoke_test(client: BirdeyeClient) -> None:
     """Confirm Birdeye connectivity at startup.
 
@@ -369,6 +399,7 @@ async def main() -> None:
             asyncio.create_task(
                 alert_dispatcher(signal_queue, db, monitor, bot, predictor)
             ),
+            asyncio.create_task(cache_cleanup_loop(client)),
         ]
         await stop_event.wait()
         log.info('Shutdown signal received — cleaning up...')

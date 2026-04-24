@@ -33,6 +33,12 @@ from config import (
     BASE_BACKOFF_SECONDS,
     BIRDEYE_API_KEY,
     BIRDEYE_BASE_URL,
+    CACHE_TTL_HOLDERS,
+    CACHE_TTL_OHLCV,
+    CACHE_TTL_OVERVIEW,
+    CACHE_TTL_PORTFOLIO,
+    CACHE_TTL_SECURITY,
+    CACHE_TTL_TRADES,
     MAX_RETRIES,
 )
 
@@ -48,6 +54,9 @@ class BirdeyeClient:
     def __init__(self) -> None:
         self._session: Optional[aiohttp.ClientSession] = None
         self._lock = asyncio.Lock()
+        # TTL cache: (path, frozen_params) -> (fetched_at, data)
+        self._cache: dict[tuple, tuple[float, Any]] = {}
+        self._cache_lock = asyncio.Lock()
         # Make sure the log directory exists so the very first append succeeds.
         log_dir = os.path.dirname(API_CALLS_LOG) or '.'
         try:
@@ -141,6 +150,46 @@ class BirdeyeClient:
         self._log(path, last_status, token_for_log)
         return None
 
+    # ------------------------------------------------------------------ #
+    # TTL response cache
+    # ------------------------------------------------------------------ #
+    async def _get_cached(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        token_for_log: str | None = None,
+        ttl_seconds: int = 30,
+    ) -> Optional[dict]:
+        """Like :meth:`_get`, but returns a cached response if one exists within ``ttl_seconds``.
+
+        Cross-layer duplicate calls for the same ``(path, params)`` tuple are
+        served from memory, so Layer 1, Layer 3 and the alert dispatcher don't
+        each burn an API call for the same token inside the TTL window.
+        """
+        frozen = (path, tuple(sorted((params or {}).items())))
+        now = time.time()
+        async with self._cache_lock:
+            if frozen in self._cache:
+                fetched_at, data = self._cache[frozen]
+                if now - fetched_at < ttl_seconds:
+                    return data
+        result = await self._get(path, params, token_for_log)
+        async with self._cache_lock:
+            self._cache[frozen] = (time.time(), result)
+        return result
+
+    async def clear_stale_cache(self, max_age: int = 300) -> None:
+        """Remove cache entries older than ``max_age`` seconds.
+
+        Called periodically from :func:`main.cache_cleanup_loop` so the cache
+        dict doesn't grow without bound as tokens churn through the pipeline.
+        """
+        now = time.time()
+        async with self._cache_lock:
+            stale = [k for k, (t, _) in self._cache.items() if now - t > max_age]
+            for k in stale:
+                del self._cache[k]
+
     # ================================================================== #
     # Public endpoint methods
     # ================================================================== #
@@ -165,19 +214,21 @@ class BirdeyeClient:
     # Birdeye endpoint: GET /defi/token_security
     async def get_token_security(self, address: str) -> Optional[dict]:
         """Honeypot / mint authority / top-holder concentration snapshot."""
-        return await self._get(
+        return await self._get_cached(
             '/defi/token_security',
             params={'address': address},
             token_for_log=address,
+            ttl_seconds=CACHE_TTL_SECURITY,
         )
 
     # Birdeye endpoint: GET /defi/token_overview
     async def get_token_overview(self, address: str) -> Optional[dict]:
         """Price, market cap, liquidity, holders and short-window price deltas."""
-        return await self._get(
+        return await self._get_cached(
             '/defi/token_overview',
             params={'address': address},
             token_for_log=address,
+            ttl_seconds=CACHE_TTL_OVERVIEW,
         )
 
     # Birdeye endpoint: GET /defi/token_trending
@@ -213,10 +264,11 @@ class BirdeyeClient:
             'time_from': now - minutes_back * 60,
             'time_to': now,
         }
-        data = await self._get(
+        data = await self._get_cached(
             '/defi/ohlcv',
             params=params,
             token_for_log=address,
+            ttl_seconds=CACHE_TTL_OHLCV,
         )
         if not data:
             return []
@@ -236,10 +288,11 @@ class BirdeyeClient:
             'tx_type': 'swap',
             'sort_type': 'desc',
         }
-        data = await self._get(
+        data = await self._get_cached(
             '/defi/txs/token',
             params=params,
             token_for_log=address,
+            ttl_seconds=CACHE_TTL_TRADES,
         )
         if not data:
             return []
@@ -252,10 +305,11 @@ class BirdeyeClient:
     # Birdeye endpoint: GET /v1/wallet/token_list
     async def get_wallet_portfolio(self, wallet: str) -> Optional[dict]:
         """Current token holdings for a wallet — used to confirm smart-money still holds."""
-        return await self._get(
+        return await self._get_cached(
             '/v1/wallet/token_list',
             params={'wallet': wallet},
             token_for_log=wallet,
+            ttl_seconds=CACHE_TTL_PORTFOLIO,
         )
 
     # Birdeye endpoint: GET /defi/v3/token/holder
@@ -266,10 +320,11 @@ class BirdeyeClient:
             'offset': 0,
             'limit': limit,
         }
-        data = await self._get(
+        data = await self._get_cached(
             '/defi/v3/token/holder',
             params=params,
             token_for_log=address,
+            ttl_seconds=CACHE_TTL_HOLDERS,
         )
         if not data:
             return []
