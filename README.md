@@ -130,7 +130,7 @@ All frequently-called Birdeye endpoints are served through a configurable TTL ca
 ## ⚙️ Setup (Docker — recommended)
 
 ```bash
-git clone https://github.com/Pyrex-13/smart-bird.git
+git clone https://github.com/savage27z/smart-bird.git
 cd smart-bird
 cp .env.example .env
 # edit .env with your BIRDEYE_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
