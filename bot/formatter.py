@@ -50,12 +50,40 @@ def _render_score_chart(score: int, breakdown: dict) -> str:
     )
 
 
+def _render_sentiment_bar(sentiment_score: int, sentiment_breakdown: dict) -> str:
+    """Render the Layer 4 sentiment section."""
+    te = int(sentiment_breakdown.get('trade_engagement', 0))
+    vb = int(sentiment_breakdown.get('volume_buzz', 0))
+    sp = int(sentiment_breakdown.get('social_presence', 0))
+    cg = int(sentiment_breakdown.get('community_growth', 0))
+
+    mood = (
+        'HYPED' if sentiment_score >= 80
+        else ('BUZZING' if sentiment_score >= 60
+              else ('NEUTRAL' if sentiment_score >= 40 else 'QUIET'))
+    )
+
+    links = sentiment_breakdown.get('social_links', [])
+    links_str = ', '.join(links) if links else 'none found'
+
+    return (
+        f'\U0001f4e1 *Sentiment* ({sentiment_score}/100 — {mood})\n'
+        f'`Trad ` {_score_bar(te)}\n'
+        f'`Buzz ` {_score_bar(vb)}\n'
+        f'`Socl ` {_score_bar(sp)}\n'
+        f'`Grow ` {_score_bar(cg)}\n'
+        f'\U0001f517 Socials: {links_str}'
+    )
+
+
 def format_entry_alert(
     token: dict,
     score: int,
     breakdown: dict,
     smart_money: dict,
     liquidity: dict,
+    sentiment_score: int = 0,
+    sentiment_breakdown: dict | None = None,
 ) -> str:
     """Build the entry alert message.
 
@@ -67,6 +95,10 @@ def format_entry_alert(
                   through so callers can log / attach it later).
     smart_money:  Layer 2 hit — ``wallet`` and ``minutes_ago`` required.
     liquidity:    Layer 3 snapshot — ``current_liquidity`` in USD.
+    sentiment_score:    Optional Layer 4 buzz score (0-100).
+    sentiment_breakdown:
+        Optional Layer 4 breakdown dict; when provided a sentiment panel is
+        appended after the Layer 1 score chart.
     """
     address = token.get('address', '')
     symbol = _md_escape(token.get('symbol') or '???')
@@ -83,6 +115,11 @@ def format_entry_alert(
 
     current_liquidity = float(liquidity.get('current_liquidity') or 0.0)
 
+    sentiment_block = (
+        f'{_render_sentiment_bar(sentiment_score, sentiment_breakdown)}\n'
+        if sentiment_breakdown else ''
+    )
+
     return (
         f"🚨 *SMART BIRD ALERT*\n"
         f"Token: ${symbol} (`{address}`)\n"
@@ -91,15 +128,25 @@ def format_entry_alert(
         f"✅ Liquidity: Healthy (${current_liquidity/1000:.1f}k depth)\n"
         f"\n"
         f"{_render_score_chart(score, breakdown)}\n"
+        f"{sentiment_block}"
         f"🔗 Birdeye: https://birdeye.so/token/{address}"
     )
 
 
-def format_graduation_alert(token: dict, score: int, breakdown: dict) -> str:
+def format_graduation_alert(
+    token: dict,
+    score: int,
+    breakdown: dict,
+    sentiment_score: int = 0,
+    sentiment_breakdown: dict | None = None,
+) -> str:
     """Layer 1 standalone alert — token crossed graduation threshold.
 
     Fires immediately when a token passes Layer 1, before (and independently of)
     any Layer 2 smart-money confirmation. Intended as an early heads-up.
+
+    ``sentiment_breakdown``, when supplied, renders a Layer 4 buzz panel below
+    the score chart.
     """
     address = token.get('address', '')
     symbol = _md_escape(token.get('symbol') or '???')
@@ -107,6 +154,10 @@ def format_graduation_alert(token: dict, score: int, breakdown: dict) -> str:
     market_cap = float(token.get('market_cap') or 0.0)
     holders = int(breakdown.get('holders') or 0)
     buy_pressure = float(breakdown.get('buy_pressure_ratio') or 0.0)
+    sentiment_block = (
+        f'{_render_sentiment_bar(sentiment_score, sentiment_breakdown)}\n'
+        if sentiment_breakdown else ''
+    )
     return (
         f"🎯 *GRADUATION WATCH*\n"
         f"Token: ${symbol} (`{address}`)\n"
@@ -114,6 +165,7 @@ def format_graduation_alert(token: dict, score: int, breakdown: dict) -> str:
         f"✅ Holders: {holders:,} | Buy Pressure: {buy_pressure*100:.0f}%\n"
         f"\n"
         f"{_render_score_chart(score, breakdown)}\n"
+        f"{sentiment_block}"
         f"⏳ Awaiting smart-money confirmation for full alert\n"
         f"🔗 Birdeye: https://birdeye.so/token/{address}"
     )
@@ -230,8 +282,14 @@ def format_token_deep_dive(
     tracked: dict | None,
     score: int,
     breakdown: dict,
+    sentiment_score: int = 0,
+    sentiment_breakdown: dict | None = None,
 ) -> str:
-    """Build the /token deep-dive response."""
+    """Build the /token deep-dive response.
+
+    ``sentiment_breakdown``, when supplied, renders a Layer 4 buzz panel below
+    the score chart so users can see the full four-layer picture in one view.
+    """
     symbol = _md_escape(overview.get('symbol') or '???')
     name = _md_escape(overview.get('name') or 'Unknown')
     price = float(overview.get('price') or 0)
@@ -293,6 +351,11 @@ def format_token_deep_dive(
     change_1h_emoji = '🟢' if change_1h > 0 else ('🔴' if change_1h < 0 else '⚪')
     change_24h_emoji = '🟢' if change_24h > 0 else ('🔴' if change_24h < 0 else '⚪')
 
+    sentiment_block = (
+        f'{_render_sentiment_bar(sentiment_score, sentiment_breakdown)}\n'
+        if sentiment_breakdown else ''
+    )
+
     return (
         f'🔎 *TOKEN DEEP DIVE*\n'
         f'\n'
@@ -306,6 +369,7 @@ def format_token_deep_dive(
         f'{change_1h_emoji} 1h: {change_1h:+.1f}% | {change_24h_emoji} 24h: {change_24h:+.1f}%\n'
         f'\n'
         f'{_render_score_chart(score, breakdown)}\n'
+        f'{sentiment_block}'
         f'🛒 Buy Pressure: {buy_pct:.0f}% buys in last {total_trades} trades\n'
         f'🏦 Top 10 Holder Concentration: {top_holder_pct*100:.0f}%'
         f'{pipeline_line}\n'

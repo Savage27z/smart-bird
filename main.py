@@ -1,12 +1,14 @@
 """Smart Bird — entry point.
 
 Boots the Telegram bot, opens the shared Birdeye client, initialises the
-SQLite database, and runs four concurrent loops:
+SQLite database, and runs four concurrent loops plus a supplementary
+sentiment analyzer:
 
     * Layer 1 — graduation predictor
     * Layer 2 — smart money tracker
     * Layer 3 — liquidity stress monitor
-    * Alert dispatcher — combines the three into entry alerts
+    * Layer 4 — social sentiment analyzer (augments entry/graduation alerts)
+    * Alert dispatcher — combines the layers into entry alerts
 
 SIGTERM / SIGINT gracefully cancels the loops, closes the HTTP session, stops
 the Telegram bot and closes the DB.
@@ -20,6 +22,7 @@ import signal
 from birdeye.client import BirdeyeClient
 from birdeye.liquidity import LiquidityMonitor
 from birdeye.new_listings import GraduationPredictor
+from birdeye.sentiment import SentimentAnalyzer
 from birdeye.smart_money import SmartMoneyTracker
 from bot.formatter import (
     format_entry_alert,
@@ -60,6 +63,7 @@ async def layer1_loop(
     db: Database,
     bot: SmartBirdBot,
     signal_queue: 'asyncio.Queue[tuple[str, dict]]',
+    sentiment: SentimentAnalyzer,
 ) -> None:
     """Periodically pull new listings, score them, and queue passers.
 
@@ -81,9 +85,15 @@ async def layer1_loop(
                     address, 'graduation', ALERT_DEDUP_WINDOW_SECONDS,
                 ):
                     continue
+                sentiment_score, sentiment_breakdown = await sentiment.analyze(
+                    address,
+                    first_seen=token.get('breakdown', {}).get('first_seen'),
+                )
                 msg = format_graduation_alert(
                     token, token.get('score', 0),
                     token.get('breakdown', {}),
+                    sentiment_score=sentiment_score,
+                    sentiment_breakdown=sentiment_breakdown,
                 )
                 await db.record_alert_attempt(address, 'graduation')
                 if await bot.send_alert(msg):
@@ -266,6 +276,7 @@ async def alert_dispatcher(
     monitor: LiquidityMonitor,
     bot: SmartBirdBot,
     predictor: GraduationPredictor,
+    sentiment: SentimentAnalyzer,
 ) -> None:
     """Combine layer outputs into entry alerts, deduped on (address, 'entry')."""
     while True:
@@ -295,6 +306,9 @@ async def alert_dispatcher(
                 continue
 
             score, breakdown = await predictor.score_token(address)
+            sentiment_score, sentiment_breakdown = await sentiment.analyze(
+                address, first_seen=current.get('first_seen'),
+            )
             token_for_msg = {
                 'address': address,
                 'symbol': token.get('symbol') or breakdown.get('symbol') or '???',
@@ -304,6 +318,8 @@ async def alert_dispatcher(
             msg = format_entry_alert(
                 token_for_msg, score, breakdown, smart_money,
                 {'current_liquidity': liq['liquidity_usd']},
+                sentiment_score=sentiment_score,
+                sentiment_breakdown=sentiment_breakdown,
             )
             await db.record_alert_attempt(address, 'entry')
             if await bot.send_alert(msg):
@@ -401,6 +417,7 @@ async def main() -> None:
     db = Database()
     client = BirdeyeClient()
     bot: SmartBirdBot | None = None
+    sentiment: SentimentAnalyzer | None = None
     tasks: list[asyncio.Task] = []
     try:
         from config import validate as validate_config
@@ -409,6 +426,7 @@ async def main() -> None:
         predictor = GraduationPredictor(client, db)
         tracker = SmartMoneyTracker(client, db, SMART_MONEY_WALLETS)
         monitor = LiquidityMonitor(client, db)
+        sentiment = SentimentAnalyzer(client)
         bot = SmartBirdBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, db, client)
 
         await bot.start()
@@ -447,11 +465,11 @@ async def main() -> None:
                 pass
 
         tasks = [
-            asyncio.create_task(layer1_loop(predictor, db, bot, signal_queue)),
+            asyncio.create_task(layer1_loop(predictor, db, bot, signal_queue, sentiment)),
             asyncio.create_task(layer2_loop(tracker, db, bot, signal_queue)),
             asyncio.create_task(layer3_loop(monitor, db, bot)),
             asyncio.create_task(
-                alert_dispatcher(signal_queue, db, monitor, bot, predictor)
+                alert_dispatcher(signal_queue, db, monitor, bot, predictor, sentiment)
             ),
             asyncio.create_task(cache_cleanup_loop(client)),
             asyncio.create_task(performance_loop(client, db)),
@@ -472,6 +490,11 @@ async def main() -> None:
             await client.aclose()
         except Exception:
             log.exception('Error closing Birdeye client')
+        if sentiment is not None:
+            try:
+                await sentiment.aclose()
+            except Exception:
+                log.exception('Error closing sentiment analyzer')
         try:
             await db.aclose()
         except Exception:

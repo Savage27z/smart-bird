@@ -300,9 +300,21 @@ class SmartBirdBot:
             predictor = GraduationPredictor(self._client, self._db)
             score, breakdown = await predictor.score_token(address)
 
+            from birdeye.sentiment import SentimentAnalyzer
+            sentiment_analyzer = SentimentAnalyzer(self._client)
+            try:
+                sentiment_score, sentiment_breakdown = await sentiment_analyzer.analyze(
+                    address,
+                    first_seen=tracked.get('first_seen') if tracked else None,
+                )
+            finally:
+                await sentiment_analyzer.aclose()
+
             from bot.formatter import format_token_deep_dive
             msg = format_token_deep_dive(
                 address, overview, trades, holders, tracked, score, breakdown,
+                sentiment_score=sentiment_score,
+                sentiment_breakdown=sentiment_breakdown,
             )
             await update.effective_message.reply_text(
                 msg, parse_mode=ParseMode.MARKDOWN,

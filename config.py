@@ -128,6 +128,16 @@ LIQUIDITY_WINDOW_SECONDS = 5 * 60  # 5 min
 LP_CONCENTRATION_THRESHOLD = 0.80  # 80%
 
 # ---------------------------------------------------------------------------
+# Layer 4 — Social sentiment
+# ---------------------------------------------------------------------------
+SENTIMENT_POLL_SECONDS = _env_int('SENTIMENT_POLL_SECONDS', 60, min_value=10, max_value=3600)
+DEXSCREENER_BASE_URL = 'https://api.dexscreener.com'
+
+ENABLE_SENTIMENT_LAYER = os.getenv(
+    'ENABLE_SENTIMENT_LAYER', 'true',
+).strip().lower() in _BOOL_TRUE
+
+# ---------------------------------------------------------------------------
 # Polling cadence
 # ---------------------------------------------------------------------------
 POLL_INTERVAL_SECONDS = _env_int('POLL_INTERVAL_SECONDS', 60, min_value=10, max_value=3600)
