@@ -9,11 +9,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Optional
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
@@ -25,6 +26,27 @@ if TYPE_CHECKING:
     from birdeye.client import BirdeyeClient
 
 log = logging.getLogger('smart-bird.bot')
+
+
+def _alert_keyboard(address: str) -> InlineKeyboardMarkup:
+    """Build the inline keyboard attached to every alert message.
+
+    Two action buttons (Deep Dive / Watch) route back through the bot via
+    :class:`CallbackQueryHandler`; the Chart button is a plain URL link that
+    Telegram opens directly without a round-trip through our backend.
+    """
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('\U0001f50d Deep Dive', callback_data=f'dive:{address}'),
+            InlineKeyboardButton('\u2b50 Watch', callback_data=f'watch:{address}'),
+        ],
+        [
+            InlineKeyboardButton(
+                '\U0001f4ca Chart',
+                url=f'https://birdeye.so/token/{address}?chain=solana',
+            ),
+        ],
+    ])
 
 
 class SmartBirdBot:
@@ -72,8 +94,10 @@ class SmartBirdBot:
         self._app.add_handler(CommandHandler('stop', self._cmd_stop))
         self._app.add_handler(CommandHandler('status', self._cmd_status))
         self._app.add_handler(CommandHandler('watchlist', self._cmd_watchlist))
+        self._app.add_handler(CommandHandler('mywatchlist', self._cmd_mywatchlist))
         self._app.add_handler(CommandHandler('token', self._cmd_token))
         self._app.add_handler(CommandHandler('performance', self._cmd_performance))
+        self._app.add_handler(CallbackQueryHandler(self._callback_handler))
 
         await self._app.initialize()
         await self._app.start()
@@ -97,7 +121,11 @@ class SmartBirdBot:
     # ------------------------------------------------------------------ #
     # Outbound
     # ------------------------------------------------------------------ #
-    async def send_alert(self, message: str) -> bool:
+    async def send_alert(
+        self,
+        message: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> bool:
         """Broadcast a Markdown alert to every subscriber.
 
         Returns True if at least one subscriber received the message. Per-
@@ -107,6 +135,10 @@ class SmartBirdBot:
 
         Falls back to the configured TELEGRAM_CHAT_ID when no subscribers
         are registered yet, so first-boot single-user setups still work.
+
+        ``reply_markup`` attaches an inline keyboard to every recipient copy
+        of the message (e.g. the Deep Dive / Watch / Chart buttons produced
+        by :func:`_alert_keyboard`).
         """
         if self._app is None:
             log.info('Alert skipped (bot not configured): %s', message.splitlines()[0])
@@ -128,6 +160,7 @@ class SmartBirdBot:
                     text=message,
                     parse_mode=ParseMode.MARKDOWN,
                     disable_web_page_preview=False,
+                    reply_markup=reply_markup,
                 )
                 any_success = True
             except Exception as e:
@@ -167,7 +200,7 @@ class SmartBirdBot:
             "🐋 Smart Money Move — tracked alpha wallet entries\n"
             "🚨 Smart Bird Alert — all three layers aligned (flagship)\n"
             "🔴 Exit Signal — liquidity stress on watched tokens\n\n"
-            "Commands: /status /watchlist /token /performance /stop",
+            "Commands: /status /watchlist /mywatchlist /token /performance /stop",
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
         )
@@ -319,9 +352,125 @@ class SmartBirdBot:
             await update.effective_message.reply_text(
                 msg, parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True,
+                reply_markup=_alert_keyboard(address),
             )
         except Exception as e:
             log.exception('Token lookup failed: %s', e)
             await update.effective_message.reply_text(
                 'Something went wrong analyzing that token. Try again later.'
             )
+
+    async def _cmd_mywatchlist(
+        self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """/mywatchlist — show the caller's personal watched tokens."""
+        if update.effective_message is None or update.effective_chat is None:
+            return
+        chat_id = str(update.effective_chat.id)
+        tokens = await self._db.get_user_watchlist(chat_id)
+        if not tokens:
+            await update.effective_message.reply_text(
+                'Your watchlist is empty. Tap \u2b50 Watch on any alert to add tokens.'
+            )
+            return
+        from bot.formatter import _md_escape
+        lines = ['*Your Watchlist*']
+        for t in tokens[:20]:
+            addr = t.get('token_address', '') or ''
+            symbol = _md_escape(t.get('symbol') or addr[:8])
+            short = f'{addr[:6]}\u2026{addr[-4:]}' if len(addr) >= 10 else addr
+            lines.append(f'\u2022 ${symbol} (`{short}`)')
+        if len(tokens) > 20:
+            lines.append(f'\u2026and {len(tokens) - 20} more')
+        await update.effective_message.reply_text(
+            '\n'.join(lines), parse_mode=ParseMode.MARKDOWN,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Inline button callbacks
+    # ------------------------------------------------------------------ #
+    async def _callback_handler(
+        self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Route inline-button presses to the appropriate per-action handler.
+
+        Every callback is ack'd immediately with ``query.answer()`` so the
+        Telegram client stops its loading spinner even if the follow-up
+        work (token lookup, DB write) takes a few seconds.
+        """
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()  # Ack immediately to stop the loading spinner.
+
+        data = query.data or ''
+        if data.startswith('dive:'):
+            address = data[len('dive:'):]
+            await self._handle_dive(query, address)
+        elif data.startswith('watch:'):
+            address = data[len('watch:'):]
+            await self._handle_watch(query, address)
+        else:
+            await query.answer('Unknown action', show_alert=True)
+
+    async def _handle_dive(self, query, address: str) -> None:
+        """Deep Dive button — run the /token analysis inline for ``address``."""
+        if self._client is None:
+            await query.answer('Token lookup unavailable', show_alert=True)
+            return
+        if query.message is None:
+            return
+
+        try:
+            overview = await self._client.get_token_overview(address)
+            if not overview:
+                await query.message.reply_text(
+                    f'Could not find token `{address}`.',
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            trades = await self._client.get_token_trades(address, limit=50)
+            holders = await self._client.get_token_holders(address, limit=10)
+            tracked = await self._db.get_token(address)
+
+            from birdeye.new_listings import GraduationPredictor
+            predictor = GraduationPredictor(self._client, self._db)
+            score, breakdown = await predictor.score_token(address)
+
+            from birdeye.sentiment import SentimentAnalyzer
+            sentiment_analyzer = SentimentAnalyzer(self._client)
+            try:
+                sentiment_score, sentiment_breakdown = await sentiment_analyzer.analyze(
+                    address,
+                    first_seen=tracked.get('first_seen') if tracked else None,
+                )
+            finally:
+                await sentiment_analyzer.aclose()
+
+            from bot.formatter import format_token_deep_dive
+            msg = format_token_deep_dive(
+                address, overview, trades, holders, tracked, score, breakdown,
+                sentiment_score=sentiment_score,
+                sentiment_breakdown=sentiment_breakdown,
+            )
+            await query.message.reply_text(
+                msg, parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            log.exception('Deep dive callback failed: %s', e)
+            await query.message.reply_text(
+                'Something went wrong analyzing that token.'
+            )
+
+    async def _handle_watch(self, query, address: str) -> None:
+        """Watch button — add ``address`` to the caller's personal watchlist."""
+        if query.message is None:
+            return
+        chat_id = str(query.message.chat_id)
+        added = await self._db.add_to_user_watchlist(chat_id, address)
+        if added:
+            await query.answer('\u2b50 Added to your watchlist!', show_alert=True)
+        else:
+            await query.answer('Already on your watchlist', show_alert=True)

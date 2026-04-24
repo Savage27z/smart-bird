@@ -89,6 +89,17 @@ CREATE TABLE IF NOT EXISTS alert_performance (
 );
 CREATE INDEX IF NOT EXISTS idx_perf_token
     ON alert_performance(token_address, alert_time);
+
+CREATE TABLE IF NOT EXISTS user_watchlist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT NOT NULL,
+    token_address TEXT NOT NULL,
+    symbol TEXT,
+    added_at INTEGER NOT NULL,
+    UNIQUE(chat_id, token_address)
+);
+CREATE INDEX IF NOT EXISTS idx_watchlist_user
+    ON user_watchlist(chat_id);
 """
 
 
@@ -650,4 +661,58 @@ class Database:
                 'avg_return_24h': float(avg_return_24h['avg_ret']) if avg_return_24h and avg_return_24h['avg_ret'] is not None else 0.0,
                 'recent': recent,
             }
+        return await asyncio.to_thread(_run)
+
+    # ------------------------------------------------------------------ #
+    # User watchlist
+    # ------------------------------------------------------------------ #
+    async def add_to_user_watchlist(
+        self, chat_id: str, address: str, symbol: str | None = None,
+    ) -> bool:
+        """Add a token to ``chat_id``'s personal watchlist.
+
+        Returns True when the row was freshly inserted, False when the token
+        was already on this user's watchlist (UNIQUE(chat_id, token_address)
+        conflict is swallowed via ``ON CONFLICT DO NOTHING``).
+        """
+        def _run() -> int:
+            return self._execute_with_rowcount(
+                """
+                INSERT INTO user_watchlist (chat_id, token_address, symbol, added_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(chat_id, token_address) DO NOTHING
+                """,
+                (str(chat_id), address, symbol, int(time.time())),
+            )
+        return (await asyncio.to_thread(_run)) > 0
+
+    async def remove_from_user_watchlist(
+        self, chat_id: str, address: str,
+    ) -> bool:
+        """Remove a token from ``chat_id``'s watchlist. Returns True if the row existed."""
+        def _run() -> int:
+            return self._execute_with_rowcount(
+                'DELETE FROM user_watchlist WHERE chat_id = ? AND token_address = ?',
+                (str(chat_id), address),
+            )
+        return (await asyncio.to_thread(_run)) > 0
+
+    async def get_user_watchlist(self, chat_id: str) -> list[dict]:
+        """Return all tokens on ``chat_id``'s watchlist, newest additions first.
+
+        Joins against ``tracked_tokens`` so callers can surface pipeline status
+        and the most recent graduation score alongside the user's own symbol.
+        """
+        def _run() -> list[dict]:
+            return self._query_all(
+                """
+                SELECT uw.token_address, uw.symbol, uw.added_at,
+                       tt.status, tt.graduation_score
+                  FROM user_watchlist uw
+                  LEFT JOIN tracked_tokens tt ON tt.address = uw.token_address
+                 WHERE uw.chat_id = ?
+                 ORDER BY uw.added_at DESC
+                """,
+                (str(chat_id),),
+            )
         return await asyncio.to_thread(_run)

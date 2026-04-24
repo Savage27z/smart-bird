@@ -30,7 +30,7 @@ from bot.formatter import (
     format_graduation_alert,
     format_smart_money_alert,
 )
-from bot.telegram_bot import SmartBirdBot
+from bot.telegram_bot import SmartBirdBot, _alert_keyboard
 from config import (
     ALERT_DEDUP_WINDOW_SECONDS,
     ENABLE_EXIT_ALERTS,
@@ -96,7 +96,7 @@ async def layer1_loop(
                     sentiment_breakdown=sentiment_breakdown,
                 )
                 await db.record_alert_attempt(address, 'graduation')
-                if await bot.send_alert(msg):
+                if await bot.send_alert(msg, reply_markup=_alert_keyboard(address)):
                     await db.record_alert_sent(address, 'graduation')
                     await db.record_alert_performance(
                         address,
@@ -155,7 +155,7 @@ async def layer2_loop(
                         ):
                             sm_msg = format_smart_money_alert(t, hit)
                             await db.record_alert_attempt(address, 'smart_money')
-                            if await bot.send_alert(sm_msg):
+                            if await bot.send_alert(sm_msg, reply_markup=_alert_keyboard(address)):
                                 await db.record_alert_sent(address, 'smart_money')
                             else:
                                 log.warning(
@@ -255,7 +255,7 @@ async def layer3_loop(
                     await db.mark_exited(address)
                     continue
                 await db.record_alert_attempt(address, 'exit')
-                if await bot.send_alert(msg):
+                if await bot.send_alert(msg, reply_markup=_alert_keyboard(address)):
                     await db.record_alert_sent(address, 'exit')
                     await db.mark_exited(address)
                 else:
@@ -322,7 +322,7 @@ async def alert_dispatcher(
                 sentiment_breakdown=sentiment_breakdown,
             )
             await db.record_alert_attempt(address, 'entry')
-            if await bot.send_alert(msg):
+            if await bot.send_alert(msg, reply_markup=_alert_keyboard(address)):
                 await db.record_alert_sent(address, 'entry')
                 await db.mark_alerted(address)
                 await db.record_alert_performance(
